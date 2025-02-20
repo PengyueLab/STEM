@@ -1,0 +1,149 @@
+### Supplemental Material: Model codes
+
+### Part 1: to simulate a pseudo dataset. Without loss of generality, we assume all Ns to have a same expected value, and omit subgroup 6 in Table 1. For all patterns of exposure and all drug pairs, the data included the following variables (equation 3): true odds ratio (OR) θ, probability = θ⁄((1+θ)), and X and N. In this example, we assumed α = β = 1.
+
+###### general settings
+install.packages("extraDistr")				### install and load R package 
+library(extraDistr)	
+N_pairs = 10000						### total number of drug pairs	
+E_N = 200						### expected value for N
+sim_alpha = 1						### alpha in equation 3
+sim_beta = 1						### beta in equation 3
+
+###### to generate data 
+N_all = rpois(N_pairs * 5, E_N)				### all N
+G_all = (exp(0.1 * N_all) - 1) / (exp(0.1 * N_all) + 1)	### to define relationship between N and theta
+G_all = ifelse(is.na(G_all) == TRUE, 1, G_all)		### to prevent overflow
+sim_alpha_all = sim_alpha * G_all				
+sim_beta_all = sim_beta * G_all
+theta_all = rbetapr(N_pairs * 5, sim_alpha_all, sim_beta_all)		### true odds ratios 
+P_all = theta_all / (1 + theta_all)					### probabilities	 
+X_all = rbinom(N_pairs * 5, N_all, P_all)				### all X
+
+###### to define timing of exposure aware data
+### We used 1 – 5 to define the timing of drug exposure according to Table 1
+### 1 for "no drug -> drug A" and "drug A -> no drug"
+### 2 for "no drug -> drug B" and "drug B -> no drug"
+### 3 for "drug B -> drug A+B" and "drug A+B -> drug B"
+### 4 for "drug A -> drug A+B" and "drug A+B -> drug A"
+### 5 for "no drug -> drug A+B" and "drug A+B -> no drug"
+data_N = as.data.frame(matrix(N_all, N_pairs, 5))		
+names(data_N) = c("N1", "N2", "N3", "N4", "N5") 	
+data_X = as.data.frame(matrix(X_all, N_pairs, 5)) 			
+names(data_X) = c("X1", "X2", "X3", "X4", "X5") 
+data_theta = as.data.frame(matrix(theta_all, N_pairs, 5)) 		
+names(data_theta) = c("theta1", "theta2", "theta3", "theta4", "theta5") 
+data_final = data.frame(data_N, data_X, data_theta)		### final data, each row is a drug pair
+
+###### define true interaction
+### "drug B -> drug A+B" > "no drug -> drug A"
+### "drug A -> drug A+B" > “no drug -> drug B"
+### "no drug -> drug A+B" > “no drug -> drug B" * "no drug -> drug B"
+temp_AonB = (data_final$theta3 > data_final$theta1)
+temp_BonA = (data_final$theta4 > data_final$theta2)			
+temp_joint = (data_final$theta5 > (data_final$theta1 * data_final$theta2))	
+data_final$DDI = (temp_AonB == TRUE | temp_BonA == TRUE | temp_joint == TRUE)
+
+### Part 2: to determine the parameter of the sensitive and timing-aware (STEM) model. The parameters under Bayesian framework were set to be α = β = 1. The parameters under empirical Bayes framework were estimated from the observed distribution based on N and X, which was a beta-binomial distribution. In this example, the true parameters were α = β = 1. We estimated the parameters under the empirical Bayes framework.
+
+###### a function to compute observed likelihood for X and N
+func_STEM = function(fun_para){				
+   fun_alpha = exp(fun_para[1])				### alpha in equation 3
+   fun_beta = exp(fun_para[2])				### beta in equation 3
+   fun_g = (exp(0.1 * N_all) - 1) / (exp(0.1 * N_all) + 1)	### relationship between sample size and OR
+   fun_g = ifelse(is.na(fun_g) == TRUE, 1, fun_g)		### prevent overflow
+   alpha.star = fun_alpha * fun_g
+   beta.star = fun_beta * fun_g
+   ### parts 1-3 are subcomponents of observed likelihood function
+   part1 = lgamma(alpha.star + X_all) - lgamma(alpha.star) 
+   part2 = lgamma(beta.star + N_all - X_all) - lgamma(beta.star)
+   part3 = lgamma(alpha.star + beta.star + N_all) - lgamma(alpha.star + beta.star)
+   ll = part1 + part2 - part3					### value of observed likelihood function
+   -sum(ll) 
+}
+
+###### to compute maximum likelihood estimator under empirical Bayes framework
+para = exp(nlminb(c(0,0), func_STEM)$par)		### compute estimator
+para							### estimated alpha and beta
+g = (exp(0.1 * N_all) - 1) / (exp(0.1 * N_all) + 1)	### relationship between sample size and parameter
+g = ifelse(is.na(g) == TRUE, 1, g)			### prevent overflow
+
+###### parameters for empirical Bayes framework (all alpha = 1 and all beta = 1 under Bayesian framework)
+data_EB_alpha = as.data.frame(matrix(para[1] * g, N_pairs, 5))
+names(data_EB_alpha) = c("alpha1", "alpha2", "alpha3", "alpha4", "alpha5")
+data_EB_beta = as.data.frame(matrix(para[2] * g, N_pairs, 5))
+names(data_EB_beta) = c("beta1", "beta2", "beta3", "beta4", "beta5")
+
+### Part 3: to compute posterior probability of no DDI (equation 6) and posterior probability of no TOE-dependent risk (equation 7) under empirical Bayes framework (all α = 1 and all β = 1 under Bayesian framework).
+
+###### general settings
+N.MC = 40000					### size for Monte Carlo method
+w1 = w2 = w3 = c(0:100) / 100			### all grids for grid searching in following 3 lines
+weight_matrix = expand.grid(w1, w2, w3)
+weight_matrix = as.matrix(weight_matrix[which(rowSums(weight_matrix)==1), ])		
+
+###### compute three estimated TOE-aware odds ratios
+data_final$AonB = NA
+data_final$BonA = NA
+data_final$joint = NA
+
+###### compute the posterior probability of no DDI under empirical Bayes framework
+data_final$FDR_DDI = NA
+###### compute the posterior probability of no TOE-dependent risk under empirical Bayes framework
+data_final$FDR_TOE = NA
+###### loop over all drug pairs
+for (i in 1:N_pairs){					
+   ### generate theta from the posterior distributions (equation4)
+   theta1 = rbetapr(N.MC, data_EB_alpha$alpha1[i] + data_final$X1[i], 
+                              data_EB_beta$beta1 + data_final$N1[i] - data_final$X1[i])	
+   theta2 = rbetapr(N.MC, data_EB_alpha$alpha2[i] + data_final$X2[i], 
+                              data_EB_beta$beta2 + data_final$N2[i] - data_final$X2[i])
+   theta3 = rbetapr(N.MC, data_EB_alpha$alpha3[i]+data_final$X3[i], 
+                              data_EB_beta$beta3 + data_final$N3[i] - data_final$X3[i])
+   theta4 = rbetapr(N.MC, data_EB_alpha$alpha4[i] + data_final$X4[i], 
+                              data_EB_beta$beta4 + data_final$N4[i] - data_final$X4[i])
+   theta5 = rbetapr(N.MC, data_EB_alpha$alpha5[i] + data_final$X5[i],
+                              data_EB_beta$beta5 + data_final$N5[i] - data_final$X5[i])
+
+   ### define the three timing of exposure aware drug interaction effect
+   ### "no drug -> drug A+B" > "no drug -> drug B" * "no drug -> drug B"
+   loop_joint = theta5 / (theta1 * theta2)	
+   loop_AonB = theta3 / theta1			### "drug B -> drug A+B" > "no drug -> drug A"
+   loop_BonA = theta4 / theta2			### "drug A -> drug A+B" > "no drug -> drug B"
+   data_final$AonB[i] = mean(loop_AonB)
+   data_final$BonA[i] = mean(loop_BonA)
+   data_final$joint[i] = mean(loop_joint)
+
+   ### use grid searching to identify FDR_DDI (equation 6)
+   ror.matrix = cbind(loop_joint, loop_AonB, loop_BonA)	
+   ### use matrix calculation to estimate the effect of interaction		
+   ror.weighted = ror.matrix %*% t(weight_matrix)		
+   FDR.weight.all = colSums(ror.weighted <= 1)				### all FDR_DDIs under all grids
+   optimal.location = which.min(FDR.weight.all)				### minimum FDR_DDI
+   data_final$FDR_DDI[i] = FDR.weight.all[optimal.location] / N.MC	### final FDR_DDI output 
+
+   ### use all pairwise ratios to identify FDR_TOE (equation 7)
+   ### define TOE-aware odds ratios under different patterns of timing of drug exposure
+   ### E1: "no drug -> drug A -> drugs A+B"/ "no drug -> drugs A+B"
+   ### E2: "no drug -> drug B -> drugs A+B"/ "no drug -> drugs A+B"
+   ### E3: "no drug -> drug A -> drugs A+B"/ "no drug -> drug B -> drugs A+B"
+   ### E4: "no drug -> drugs A+B"/ "no drug -> drug A -> drugs A+B"
+   ### E5: "no drug -> drugs A+B"/ "no drug -> drug B -> drugs A+B"
+   ### E6: "no drug -> drug B -> drugs A+B"/ "no drug -> drug A -> drugs A+B"
+   delta = 0.25
+ loop_E1 = sum((theta1 * theta4) / theta5 <= (1 + delta)) / N.MC
+ loop_E2 = sum((theta2 * theta3) / theta5 <= (1 + delta)) / N.MC
+ loop_E3 = sum((theta1 * theta4) / (theta2 * theta3) <= (1 + delta)) / N.MC
+ loop_E4 = sum(theta5 / (theta1 * theta4) <= 1 / (1 + delta)) / N.MC
+ loop_E5 = sum(theta5 / (theta2 * theta3) <= 1 / (1 + delta)) / N.MC
+ loop_E6 = sum((theta2 * theta3) / (theta1 * theta4) <= 1 / (1 + delta)) / N.MC
+
+ ### final FDR_TOE output
+ data_final$FDR_TOE[i] = min(loop_E1, loop_E2, loop_E3, loop_E4, loop_E5, loop_E6) 
+}	
+
+### Part 4: to view examples.
+
+### Find an example
+location_signal = which(data_final$FDR_DDI<0.05 & data_final$FDR_TOE<0.05)
+data_final[location_signal[1], c("AonB", "BonA", "joint")]
